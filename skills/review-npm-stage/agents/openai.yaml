@@ -1,0 +1,4 @@
+interface:
+  display_name: Review npm Stage
+  short_description: Review staged npm packages before approval
+  default_prompt: Use $review-npm-stage to inspect pending staged npm packages and approve only when the review gate passes.
