@@ -20,6 +20,14 @@ import type {
   WorkspaceInfo,
 } from './types.ts'
 
+const MIN_PARTIAL_STAGE_STABILITY_MS = 5_000
+
+interface PollForStagesDependencies {
+  listStages?: typeof npmStageList
+  now?: () => number
+  wait?: (milliseconds: number) => Promise<unknown>
+}
+
 function isVersionPolicyFailure(result: {
   stdout: string
   stderr: string
@@ -141,12 +149,23 @@ export async function pollForStages(
   mode: CollectMode,
   registry: string,
   { timeout, interval }: Pick<CollectOptions, 'timeout' | 'interval'>,
+  {
+    listStages = npmStageList,
+    now = Date.now,
+    wait = delay,
+  }: PollForStagesDependencies = {},
 ): Promise<StageRecord[]> {
-  const deadline = Date.now() + timeout * 1000
+  const deadline = now() + timeout * 1000
+  const partialStabilityMs = Math.max(
+    MIN_PARTIAL_STAGE_STABILITY_MS,
+    interval * 2_000,
+  )
+  let workspaceSignature: string | null = null
+  let workspaceChangedAt: number | null = null
 
   while (true) {
     if (mode.kind === 'package') {
-      const matches = (await npmStageList(registry, mode.target.name)).filter(
+      const matches = (await listStages(registry, mode.target.name)).filter(
         (item) =>
           item.packageName === mode.target.name &&
           item.version === mode.target.version,
@@ -159,14 +178,40 @@ export async function pollForStages(
           (project) => `${project.name}@${project.version}`,
         ),
       )
-      const matches = (await npmStageList(registry)).filter((item) =>
+      const matches = (await listStages(registry)).filter((item) =>
         candidates.has(stageIdentity(item)),
       )
       const unique = uniqueStages(matches)
-      if (unique.length > 0) return unique
+      if (unique.length > 0) {
+        if (unique.length === candidates.size) return unique
+
+        const observedAt = now()
+        const signature = unique.map((item) => item.id).join('\0')
+        if (signature !== workspaceSignature) {
+          workspaceSignature = signature
+          workspaceChangedAt = observedAt
+        }
+        const timedOut = observedAt >= deadline
+        const stable =
+          workspaceChangedAt !== null &&
+          observedAt - workspaceChangedAt >= partialStabilityMs
+        if (stable || timedOut) {
+          const matched = new Set(unique.map(stageIdentity))
+          const missing = [...candidates]
+            .filter((identity) => !matched.has(identity))
+            .toSorted((a, b) => a.localeCompare(b, 'en'))
+          mode.workspace.warnings.push(
+            `npm stage list ${timedOut ? 'timed out' : 'stabilized'} with a partial workspace batch (${unique.length}/${candidates.size}); missing: ${missing.join(', ')}`,
+          )
+          return unique
+        }
+      } else {
+        workspaceSignature = null
+        workspaceChangedAt = null
+      }
     }
-    if (Date.now() >= deadline) break
-    await delay(Math.min(interval * 1000, Math.max(0, deadline - Date.now())))
+    if (now() >= deadline) break
+    await wait(Math.min(interval * 1000, Math.max(0, deadline - now())))
   }
   throw new UserError(
     `Timed out after ${timeout} seconds waiting for the expected npm stage records`,

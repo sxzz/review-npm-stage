@@ -36,6 +36,7 @@ import {
   selectBaselineVersion,
   simpleRangeSatisfies,
 } from '../src/semver.ts'
+import { pollForStages, stageIdentity } from '../src/stages.ts'
 import { integrityMatches } from '../src/tarballs.ts'
 import { validateVerdict } from '../src/verdict.ts'
 
@@ -99,6 +100,37 @@ async function makePackageTarball(root, label, manifest, files) {
   return { tarball, inventory, hashes: await hashFile(tarball) }
 }
 
+function makeWorkspaceMode(packageNames) {
+  const candidates = packageNames.map((name) => ({
+    name,
+    version: '1.0.0',
+    path: `/workspace/packages/${name}`,
+    private: false,
+  }))
+  return {
+    kind: 'workspace',
+    workspace: {
+      root: '/workspace',
+      all: candidates,
+      candidates,
+      warnings: [],
+    },
+  }
+}
+
+function makeStage(packageName, index) {
+  return {
+    id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    packageName,
+    version: '1.0.0',
+    tag: 'latest',
+    createdAt: null,
+    actor: null,
+    actorType: null,
+    shasum: null,
+  }
+}
+
 test('cac CLI handles help, unknown options, and repeated values', async () => {
   const parsedCli = createReviewCli()
   parsedCli.parse(
@@ -157,6 +189,100 @@ test('cac CLI handles help, unknown options, and repeated values', async () => {
   ])
   assert.equal(unknown.code, 1)
   assert.match(unknown.stderr, /Unknown option/)
+})
+
+test('workspace polling waits through staggered stage uploads', async () => {
+  const packageNames = [
+    'package-a',
+    'package-b',
+    'package-c',
+    'package-d',
+    'package-e',
+  ]
+  const mode = makeWorkspaceMode(packageNames)
+  const stages = packageNames.map(makeStage)
+  let clock = 0
+  let listCalls = 0
+
+  const result = await pollForStages(
+    mode,
+    'https://registry.example.test/',
+    { timeout: 30, interval: 1 },
+    {
+      listStages: () => {
+        const visible = Math.min(stages.length, Math.floor(listCalls / 3) + 1)
+        listCalls += 1
+        return Promise.resolve(stages.slice(0, visible))
+      },
+      now: () => clock,
+      wait: (milliseconds) => {
+        clock += milliseconds
+        return Promise.resolve()
+      },
+    },
+  )
+
+  assert.deepEqual(
+    result.map(stageIdentity),
+    packageNames.map((name) => `${name}@1.0.0`),
+  )
+  assert.equal(listCalls, 13)
+  assert.deepEqual(mode.workspace.warnings, [])
+})
+
+test('workspace polling warns after a partial batch stabilizes', async () => {
+  const mode = makeWorkspaceMode(['package-a', 'package-b', 'package-c'])
+  let clock = 0
+  let listCalls = 0
+
+  const result = await pollForStages(
+    mode,
+    'https://registry.example.test/',
+    { timeout: 30, interval: 1 },
+    {
+      listStages: () => {
+        listCalls += 1
+        return Promise.resolve([makeStage('package-a', 0)])
+      },
+      now: () => clock,
+      wait: (milliseconds) => {
+        clock += milliseconds
+        return Promise.resolve()
+      },
+    },
+  )
+
+  assert.deepEqual(result.map(stageIdentity), ['package-a@1.0.0'])
+  assert.equal(clock, 5_000)
+  assert.equal(listCalls, 6)
+  assert.deepEqual(mode.workspace.warnings, [
+    'npm stage list stabilized with a partial workspace batch (1/3); missing: package-b@1.0.0, package-c@1.0.0',
+  ])
+})
+
+test('workspace polling warns when a partial batch reaches the timeout', async () => {
+  const mode = makeWorkspaceMode(['package-a', 'package-b', 'package-c'])
+  let clock = 0
+
+  const result = await pollForStages(
+    mode,
+    'https://registry.example.test/',
+    { timeout: 2, interval: 1 },
+    {
+      listStages: () => Promise.resolve([makeStage('package-a', 0)]),
+      now: () => clock,
+      wait: (milliseconds) => {
+        clock += milliseconds
+        return Promise.resolve()
+      },
+    },
+  )
+
+  assert.deepEqual(result.map(stageIdentity), ['package-a@1.0.0'])
+  assert.equal(clock, 2_000)
+  assert.deepEqual(mode.workspace.warnings, [
+    'npm stage list timed out with a partial workspace batch (1/3); missing: package-b@1.0.0, package-c@1.0.0',
+  ])
 })
 
 test('tinyexec command execution preserves failures and output limits', async () => {

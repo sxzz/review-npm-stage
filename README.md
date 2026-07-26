@@ -32,7 +32,10 @@ flowchart TD
     Target -->|"No"| Package["Read exact name and version from current package.json"]
     Workspace --> WorkspaceList["Query npm stage list immediately"]
     Package --> PackageList["Poll npm stage list NAME for that exact version"]
-    WorkspaceList --> Artifacts
+    WorkspaceList --> WorkspaceComplete{"All workspace candidates matched?"}
+    WorkspaceComplete -->|"Yes"| Artifacts
+    WorkspaceComplete -->|"No"| WorkspaceSettle["Poll until the partial set stabilizes or times out<br/>and warn about missing candidates"]
+    WorkspaceSettle --> Artifacts
     PackageList --> Artifacts["Acquire both artifacts in parallel"]
     Artifacts --> Staged["Download the staged tarball"]
     Artifacts --> Baseline["Fetch packument and stream the baseline tarball"]
@@ -150,8 +153,13 @@ The collector walks upward for `pnpm-workspace.yaml`. If it finds one, it
 intersects the current publishable workspace package versions with
 `npm stage list`. If there is no workspace, it reads the current
 `package.json`, calls `npm stage list NAME`, and matches that exact version.
-Both modes query immediately and return as soon as matching immutable stages
-exist; polling starts only when the first query finds no match.
+Both modes query immediately. Package mode returns as soon as the exact stage
+exists. Workspace mode returns immediately when all candidates match; if only
+part of the candidate set exists, it keeps polling until the matched set has
+not changed for at least two polling intervals and five seconds, or until the
+total timeout. A partial result includes a warning with the matched count and
+every missing candidate, because the collector cannot distinguish a stage
+that is still uploading from a package that is not part of this release.
 
 Stage UUID and package-spec inputs are intentionally unsupported. CI does not
 need to capture or pass a UUID; the collector records the immutable UUID

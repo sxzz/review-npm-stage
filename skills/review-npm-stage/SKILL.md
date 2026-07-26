@@ -45,9 +45,13 @@ The collector must:
 - Read exact package names and versions from local manifests, then match them
   against `npm stage list`. Never infer a target from the newest pending stage
   alone and never require CI to capture a stage UUID.
-- Query `npm stage list` immediately. Return matching immutable stages
-  immediately; poll at the configured interval only when the first query has
-  no match.
+- Query `npm stage list` immediately. For a single package, return its exact
+  immutable stage as soon as it appears. For a workspace, return immediately
+  only when every candidate matches. If the match is partial, keep polling
+  until the set remains unchanged for at least two polling intervals and five
+  seconds, or until the total timeout; report the matched count and every
+  missing candidate as a warning. Treat that warning as `needs-confirmation`;
+  do not assume the missing candidates are outside the release.
 - Download the staged tarball with `npm stage download` while resolving and downloading the baseline in parallel.
 - Select the highest published SemVer below the target, including prereleases.
 - Download the exact baseline tarball directly from the registry URL in its version metadata.
